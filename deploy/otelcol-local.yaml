@@ -1,0 +1,33 @@
+# Local OTLP stub for progenyd development.
+# Receives OTLP over HTTP/gRPC and prints everything to the console — lets us
+# verify progenyd's metrics (aggregates) and logs (per-PID wide events) without
+# any backend. Not for production; OpenObserve replaces the `debug` exporter later.
+#
+# Run:  ./otelcol --config deploy/otelcol-local.yaml
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:4318
+      grpc:
+        endpoint: 127.0.0.1:4317
+
+exporters:
+  debug:
+    verbosity: detailed
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      exporters: [debug]
+    logs:
+      receivers: [otlp]
+      exporters: [debug]
+    traces:
+      receivers: [otlp]
+      exporters: [debug]
+  telemetry:
+    logs:
+      level: info   # the `debug` exporter prints received data at INFO — must not raise this
+

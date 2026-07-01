@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- LaunchAgent template for progenyd. `__HOME__` is substituted at install time.
+     Install:
+       swift build -c release
+       install -m 0755 .build/release/progenyd ~/.local/bin/progenyd
+       sed "s|__HOME__|$HOME|g" deploy/local.progenyd.plist > ~/Library/LaunchAgents/local.progenyd.plist
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.progenyd.plist
+     Stop / remove:
+       launchctl bootout gui/$(id -u)/local.progenyd
+
+     By default this runs the in-RAM forensic buffer + localhost query server only
+     (self-contained, no external services). To also ship to an OTLP backend
+     (OpenObserve, an OTel Collector, …), uncomment the PROGENY_OTLP keys below. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.progenyd</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/.local/bin/progenyd</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PROGENY_INTERVAL_SEC</key><string>15</string>
+        <key>PROGENY_TOP_N</key><string>20</string>
+        <!-- In-RAM buffer + localhost query server are on by default (:9847). -->
+        <!-- Enable OTLP export by uncommenting and setting your own endpoint:
+        <key>PROGENY_OTLP</key><string>1</string>
+        <key>PROGENY_OTLP_ENDPOINT</key><string>http://YOUR-OTLP-ENDPOINT:4318</string>
+        -->
+    </dict>
+
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+
+    <!-- Energy: Background = efficiency-core scheduling + throttled I/O. -->
+    <key>ProcessType</key><string>Background</string>
+    <key>LowPriorityIO</key><true/>
+
+    <key>StandardOutPath</key><string>__HOME__/Library/Logs/progenyd.log</string>
+    <key>StandardErrorPath</key><string>__HOME__/Library/Logs/progenyd.log</string>
+</dict>
+</plist>
