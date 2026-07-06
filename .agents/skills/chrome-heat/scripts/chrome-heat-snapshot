@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+istat_db="$HOME/Library/Application Support/iStat Menus 7/history/history.db"
+
+json_escape() {
+  python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'
+}
+
+chrome_windows_tabs() {
+  osascript -l JavaScript <<'JXA' 2>/dev/null || printf '{"error":"chrome AppleScript unavailable"}'
+const Chrome = Application('Google Chrome');
+JSON.stringify({
+  windows: Chrome.windows().length,
+  tabs: Chrome.windows().reduce((n, w) => n + w.tabs().length, 0)
+});
+JXA
+}
+
+cdp_status() {
+  if curl -fsS --max-time 1 http://127.0.0.1:9222/json/version >/tmp/chrome-cdp-version.json 2>/dev/null; then
+    python3 - <<'PY'
+import json
+print(json.dumps({"reachable": True, "version": json.load(open("/tmp/chrome-cdp-version.json"))}))
+PY
+  else
+    printf '{"reachable":false}'
+  fi
+}
+
+istat_gpu() {
+  if [ -f "$istat_db" ]; then
+    sqlite3 "$istat_db" \
+      "with x as (select processor from gpu where interval=5 and time >= strftime('%s','now','-30 minutes')) select json_object('samples', count(*), 'avg', round(avg(processor),1), 'min', round(min(processor),1), 'max', round(max(processor),1)) from x;" \
+      2>/dev/null || printf '{}'
+  else
+    printf '{}'
+  fi
+}
+
+process_summary() {
+  ps -axo pid,ppid,%cpu,rss,comm |
+    awk '
+      /WindowServer/ { ws_cpu += $3; ws_pid=$1 }
+      /Google Chrome Helper \(Renderer\)/ { render_cpu += $3; render_rss += $4; render_n++ }
+      /Google Chrome Helper.app/ { helper_cpu += $3; helper_n++ }
+      END {
+        printf("{\"windowServer\":{\"pid\":%d,\"cpu\":%.1f},\"chromeRenderers\":{\"count\":%d,\"cpu\":%.1f,\"rssGiB\":%.1f},\"chromeHelpers\":{\"count\":%d,\"cpu\":%.1f}}", ws_pid, ws_cpu, render_n, render_cpu, render_rss/1024/1024, helper_n, helper_cpu)
+      }'
+}
+
+top_renderers() {
+  ps -axo pid,ppid,%cpu,rss,comm |
+    awk '/Google Chrome Helper \(Renderer\)/ { printf "{\"pid\":%s,\"ppid\":%s,\"cpu\":%.1f,\"rssMiB\":%.1f}\n", $1, $2, $3, $4/1024 }' |
+    sort -t: -k4 -nr |
+    head -10 |
+    python3 -c 'import json,sys; print(json.dumps([json.loads(line) for line in sys.stdin if line.strip()]))'
+}
+
+main_args="$(
+  ps -axo pid,command |
+    grep -F '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' |
+    grep -v 'Google Chrome Helper' |
+    head -1 |
+    json_escape
+)"
+
+cat <<JSON
+{
+  "collectedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "chrome": {
+    "windowsTabs": $(chrome_windows_tabs),
+    "mainCommand": $main_args,
+    "cdp": $(cdp_status)
+  },
+  "gpu": {
+    "istat30m": $(istat_gpu)
+  },
+  "processes": $(process_summary),
+  "topChromeRenderers": $(top_renderers)
+}
+JSON

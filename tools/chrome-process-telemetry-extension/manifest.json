@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Progeny Chrome Process Telemetry",
+  "version": "0.1.0",
+  "description": "Local helper for mapping Chrome OS process IDs to task titles, tab IDs, and CPU usage.",
+  "permissions": [
+    "processes",
+    "tabs"
+  ],
+  "action": {
+    "default_title": "Chrome Process Telemetry",
+    "default_popup": "popup.html"
+  }
+}

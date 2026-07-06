@@ -1,0 +1,4 @@
+interface:
+  display_name: "Chrome Heat"
+  short_description: "Correlate Chrome renderer, GPU, and WindowServer heat on macOS."
+  default_prompt: "Investigate Chrome and WindowServer heat using local telemetry and browser process mapping."

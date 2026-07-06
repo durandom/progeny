@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# renderer-to-tabs <renderer-pid>
+#
+# Maps a Chrome renderer PID to the tab(s) it hosts, with no CDP and no
+# extension. Two passes:
+#   1. Baseline: probe every tab via AppleScript JS eval while nothing is
+#      frozen. Tabs that time out here are Chrome-frozen/discarded
+#      background tabs (Memory Saver) — false positives to exclude.
+#   2. Freeze: SIGSTOP the renderer, probe again. Tabs that time out only
+#      in this pass live on the frozen renderer.
+# Resumes the renderer on exit (including Ctrl-C).
+#
+# Requires (one-time, in Chrome):
+#   View > Developer > Allow JavaScript from Apple Events
+#
+# Caveats:
+#   - Matches main frames only. Heat from out-of-process iframes (ads,
+#     embeds) maps to no tab's main frame.
+#   - One renderer can host several same-site tabs; all are reported.
+#   - The hot tab freezes for the probe duration (a few seconds).
+#   - Tabs opened/closed between the two passes can shift indices and
+#     produce wrong matches; avoid using Chrome during the run.
+
+die() { echo "error: $*" >&2; exit 1; }
+
+pid="${1:-}"
+[[ -n "$pid" ]] || die "usage: renderer-to-tabs <renderer-pid>"
+
+cmd=$(ps -p "$pid" -o command= 2>/dev/null) || die "no such pid: $pid"
+[[ "$cmd" == *"--type=renderer"* ]] || die "pid $pid is not a Chrome renderer (--type=renderer)"
+
+# Probe one tab first while everything is running, to fail fast if the
+# JS-from-Apple-Events toggle is off. Only the explicit "turned off" error
+# means the toggle is disabled; other errors (chrome:// page, PDF, frozen
+# tab in front) are harmless here.
+probe_err=$(osascript -e 'tell application "Google Chrome" to execute active tab of front window javascript "1"' 2>&1 >/dev/null) || true
+if [[ "$probe_err" == *"turned off"* ]]; then
+  die "JS eval unavailable. Enable: Chrome menu View > Developer > Allow JavaScript from Apple Events"
+fi
+
+probe_all_tabs() {
+  osascript <<'AS'
+set silentTabs to {}
+tell application "Google Chrome"
+  set wCount to count of windows
+  repeat with w from 1 to wCount
+    set tCount to count of tabs of window w
+    repeat with t from 1 to tCount
+      set probeTimedOut to false
+      try
+        with timeout of 1 second
+          execute tab t of window w javascript "1"
+        end timeout
+      on error errMsg number errNum
+        -- -1712: Apple event timed out => tab's renderer did not respond.
+        -- Other errors (chrome:// pages, PDFs) return fast; ignore them.
+        if errNum is -1712 then set probeTimedOut to true
+      end try
+      if probeTimedOut then
+        set tabTitle to title of tab t of window w
+        set tabURL to URL of tab t of window w
+        set end of silentTabs to ("window " & w & " tab " & t & " | " & tabTitle & " | " & tabURL)
+      end if
+    end repeat
+  end repeat
+end tell
+set AppleScript's text item delimiters to linefeed
+return silentTabs as text
+AS
+}
+
+echo "pass 1/2: baseline probe (Chrome-frozen background tabs)..." >&2
+baseline=$(probe_all_tabs)
+
+echo "pass 2/2: freezing renderer $pid and probing again..." >&2
+trap 'kill -CONT "$pid" 2>/dev/null || true' EXIT INT TERM
+kill -STOP "$pid"
+frozen=$(probe_all_tabs)
+kill -CONT "$pid"
+
+# Tabs silent only while the renderer was stopped.
+matches=$(comm -13 <(sort <<<"$baseline") <(sort <<<"$frozen") | sed '/^$/d')
+
+if [[ -z "$matches" ]]; then
+  echo "no main-frame tab matched (renderer may host only iframes, an extension, or a background page)"
+else
+  echo "$matches"
+fi
