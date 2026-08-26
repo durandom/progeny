@@ -1,6 +1,6 @@
 -- Sustained runaway: one PID hot across MANY samples (not a single spike).
 -- Run over the suspect window, e.g. --hours 12 for "overnight".
--- pg-oo logs "<this>" --hours 12
+-- progeny-oo logs "<this>" --hours 12
 SELECT pid, comm, ppid, ancestry,
        COUNT(*)                                        AS samples,
        ROUND(AVG(CAST(cpu_percent AS DOUBLE)), 1)      AS avg_cpu,

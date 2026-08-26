@@ -20,6 +20,8 @@ struct Config {
     var memWindowMin: Double        // in-RAM full-history window
     var queryEnabled: Bool
     var queryPort: UInt16
+    var otlpDiagLevel: String       // swift-otel's own verbosity; see otelLogLevel
+    var hostName: String            // resource attribute: which machine these series came from
 
     static func fromEnv() -> Config {
         let e = ProcessInfo.processInfo.environment
@@ -36,8 +38,33 @@ struct Config {
             stdoutEnabled: (e["PROGENY_STDOUT"] ?? "0") == "1",
             memWindowMin: e["PROGENY_MEM_WINDOW_MIN"].flatMap(Double.init) ?? 240,   // 4h in RAM
             queryEnabled: (e["PROGENY_QUERY"] ?? "1") == "1",
-            queryPort: e["PROGENY_QUERY_PORT"].flatMap { UInt16($0) } ?? 9847
+            queryPort: e["PROGENY_QUERY_PORT"].flatMap { UInt16($0) } ?? 9847,
+            otlpDiagLevel: e["PROGENY_OTLP_DIAG_LEVEL"] ?? "warning",
+            hostName: e["PROGENY_HOST_NAME"] ?? Config.defaultHostName()
         )
+    }
+
+    // swift-otel reports delivery failures as `logger.warning("Failed to export
+    // metrics.")`. Anything stricter than .warning therefore turns a total export
+    // outage into silence: progenyd held ESTABLISHED sockets to the sink for two
+    // days in Aug 2026 while every batch was dropped, and the launchd log showed
+    // only the startup banner. Default to .warning so the failure is loud.
+    static func otelLogLevel(_ name: String) -> OTel.Configuration.LogLevel {
+        switch name.lowercased() {
+        case "error": .error
+        case "warning": .warning
+        case "info": .info
+        case "debug": .debug
+        case "trace": .trace
+        default: .warning
+        }
+    }
+
+    // `hostName` is "proteus.local" on a Mac; the trailing .local is noise in a
+    // label that exists to tell two machines apart.
+    static func defaultHostName() -> String {
+        let raw = ProcessInfo.processInfo.hostName
+        return raw.hasSuffix(".local") ? String(raw.dropLast(6)) : raw
     }
 
     var ringCapacity: Int { max(1, Int((memWindowMin * 60) / intervalSec)) }
@@ -101,7 +128,7 @@ func startTimer() {
 
 func logStartup(_ sinks: String) {
     FileHandle.standardError.write(Data(
-        "progenyd: \(sinks), every \(config.intervalSec)s (leeway ~\(config.intervalSec/3)s), top \(config.topN) by energy\n".utf8
+        "progenyd: \(sinks), host=\(config.hostName), every \(config.intervalSec)s (leeway ~\(config.intervalSec/3)s), top \(config.topN) by energy\n".utf8
     ))
 }
 
@@ -114,7 +141,11 @@ if config.queryEnabled {
 if config.otlpEnabled {
     var otel = OTel.Configuration.default
     otel.serviceName = "progenyd"
-    otel.diagnosticLogLevel = .error
+    // Without host.name every writer produces the same series identity — same
+    // service_name, same __hash__ — and the sink cannot tell two machines apart.
+    // Cheap to add now, impossible to backfill once two hosts have merged.
+    otel.resourceAttributes["host.name"] = config.hostName
+    otel.diagnosticLogLevel = Config.otelLogLevel(config.otlpDiagLevel)
     otel.metrics.otlpExporter.protocol = .httpProtobuf
     otel.logs.otlpExporter.protocol = .httpProtobuf
     otel.traces.otlpExporter.protocol = .httpProtobuf

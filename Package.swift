@@ -21,7 +21,11 @@ let package = Package(
                 .product(name: "Metrics", package: "swift-metrics"),
                 .product(name: "Logging", package: "swift-log"),
             ],
-            path: "Sources/progenyd"
+            path: "Sources/progenyd",
+            linkerSettings: [
+                .linkedFramework("IOKit"),
+                .linkedLibrary("sqlite3")
+            ]
         )
     ]
 )

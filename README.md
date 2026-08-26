@@ -13,7 +13,7 @@ who spawned it?*
 - **Energy-first** — background-QoS, coalesced timer → 1–2 wakeups per sample.
   Reads real per-process energy (`ri_energy_nj`), cycles, wakeups, per-QoS CPU.
 - **Forensic** — every process with its `pid`, `ppid`, full **ancestry chain**
-  (`1/572/933`), full argv, energy, and rusage counters.
+  (`1/572/933`), first-seen parent command, full argv, energy, and rusage counters.
 - **Three query surfaces** — an in-RAM full-history buffer (no disk), plus
   optional OTLP metrics + logs to any OpenTelemetry backend.
 - **No dashboards required** — an included Claude Code skill answers system
@@ -72,6 +72,36 @@ launchctl bootout   gui/$(id -u)/local.progenyd                                #
 
 The agent runs at `ProcessType Background` (efficiency cores) with `KeepAlive`.
 
+## Run as root
+
+Use a system LaunchDaemon when progeny should run as root. Stop the per-user
+LaunchAgent first if it is already using the default query port `9847`.
+
+```bash
+swift build -c release
+
+launchctl bootout gui/$(id -u)/local.progenyd 2>/dev/null || true
+
+sudo install -d -m 0755 /usr/local/sbin
+sudo install -m 0755 .build/release/progenyd /usr/local/sbin/progenyd
+sudo install -m 0644 deploy/local.progenyd.daemon.plist /Library/LaunchDaemons/local.progenyd.plist
+
+sudo launchctl bootstrap system /Library/LaunchDaemons/local.progenyd.plist
+sudo launchctl print system/local.progenyd | grep -E 'state =|pid ='
+```
+
+Stop/remove the root daemon:
+
+```bash
+sudo launchctl bootout system/local.progenyd
+sudo rm /Library/LaunchDaemons/local.progenyd.plist
+```
+
+The localhost query server remains bound to `127.0.0.1`. Logs go to
+`/var/log/progenyd.log`. Running as root improves argv/path visibility for
+processes owned by other users and is the right place to add privileged hardware
+sampling later.
+
 ## Configuration (environment)
 
 | Variable | Default | Meaning |
@@ -100,6 +130,10 @@ every process, no top-N limit — over the buffered window. NDJSON out.
 | `/pid/<pid>` | one PID's cpu/energy/rss trajectory across ticks |
 | `/comm/<name>` | every row for a command over time — **swarm churn** (stable PID set = leak; growing = respawn) |
 | `/window/<minutes>` | every process row in the last N minutes |
+| `/host/latest` | newest host metrics, including CPU/load/memory/thermal and battery power when available |
+| `/host/window/<minutes>` | host metrics over a window |
+| `/spotlight/latest` | newest Spotlight aggregate: active flag, mds/mds_stores/worker CPU, worker count, disk deltas |
+| `/spotlight/window/<minutes>` | Spotlight aggregate over a window |
 
 ## OpenTelemetry export (optional)
 
@@ -107,21 +141,30 @@ Set `PROGENY_OTLP=1` and `PROGENY_OTLP_ENDPOINT` to ship to any OTLP/HTTP backen
 (an OTel Collector, OpenObserve, …). progeny emits:
 
 - **metrics**: `progeny_system_*` (cpu, energy, process/orphan counts,
-  `orphan_max_comm_count`) and `progeny_host_*` (cpu, memory, load, thermal).
+  `orphan_max_comm_count`) and `progeny_host_*` (cpu, memory, load, thermal,
+  battery power; fan/CPU/GPU power streams are emitted only when values are
+  available), plus `progeny_spotlight_*` aggregates for `mds`, `mds_stores`, and
+  `mdworker*` activity.
 - **logs**: per-PID `body="proc"` records (pid, ppid, comm, command, ancestry,
-  energy, …) + `body="orphan_swarm"` cluster records, all tagged
-  `service.name=progenyd`.
+  first parent command, energy, …) + enriched `body="orphan_swarm"` cluster
+  records, all tagged `service.name=progenyd`.
 
 A ready local collector config for testing is in
 [`deploy/otelcol-local.yaml`](deploy/otelcol-local.yaml).
 
+Fan RPM is best-effort. progeny first tries the native SMC fan keys; on Apple
+Silicon systems where those keys are not exposed to progeny but iStat Menus is
+installed, it can fall back to the current console user's iStat Menus 7 sensor
+history database and emit fresh RPM values from there.
+
 ## AI-driven analysis (no dashboards)
 
-[`.claude/skills/progeny-analyze`](.claude/skills/progeny-analyze) is a
+[`.agents/skills/progeny-analyze`](.agents/skills/progeny-analyze) is a
 [Claude Code](https://claude.com/claude-code) skill that answers system questions
 in prose — "what's eating my CPU/energy?", "what ran away overnight and who
 spawned it?", "is this swarm leaking or respawning?" — by querying the in-RAM
-buffer (`pg-local`) and, if configured, OpenObserve (`pg-oo`). See its `SKILL.md`.
+buffer (`progeny-local`) and, if configured, OpenObserve (`progeny-oo`). The helper
+scripts live in `.agents/skills/progeny-analyze/bin/`; see its `SKILL.md`.
 
 ## Design
 

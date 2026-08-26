@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# progeny-local — query the progenyd IN-RAM forensic buffer (localhost, no SSD, full
+# per-PID fidelity over the recent window ~4h). Complements progeny-oo (OpenObserve),
+# which holds summarized long-term data.
+#
+# Usage:
+#   progeny-local stats                 # buffer fill + time window
+#   progeny-local latest                # every process in the newest snapshot (NDJSON)
+#   progeny-local pid  <pid>            # one PID's trajectory across every buffered tick
+#   progeny-local comm <name>          # all rows for a command over time (SWARM CHURN)
+#   progeny-local window <minutes>     # every process row in the last N minutes
+#   progeny-local host latest          # newest host metrics
+#   progeny-local host window <minutes># host metrics over the last N minutes
+#   progeny-local spotlight latest     # newest Spotlight aggregate
+#   progeny-local spotlight window <m> # Spotlight aggregate over the last N minutes
+#
+# Output is NDJSON — pipe to jq / python3. Only reachable on this machine.
+set -euo pipefail
+PORT="${PROGENY_QUERY_PORT:-9847}"
+route="${1:?usage: progeny-local <stats|latest|pid|comm|window|host|spotlight> [arg...]}"
+shift || true
+path="$route"
+for arg in "$@"; do
+  enc=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$arg")
+  path="$path/$enc"
+done
+curl -sS -m 10 "http://127.0.0.1:$PORT/$path" \
+  || { echo "progenyd query server not reachable on :$PORT (is the daemon running with PROGENY_QUERY=1?)" >&2; exit 1; }

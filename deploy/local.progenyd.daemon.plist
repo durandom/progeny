@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- LaunchDaemon template for running progenyd as root.
+     Install:
+       swift build -c release
+       sudo install -d -m 0755 /usr/local/sbin
+       sudo install -m 0755 .build/release/progenyd /usr/local/sbin/progenyd
+       sudo install -m 0644 deploy/local.progenyd.daemon.plist /Library/LaunchDaemons/local.progenyd.plist
+       sudo launchctl bootstrap system /Library/LaunchDaemons/local.progenyd.plist
+     Stop / remove:
+       sudo launchctl bootout system/local.progenyd
+       sudo rm /Library/LaunchDaemons/local.progenyd.plist
+
+     Stop the per-user LaunchAgent before starting this daemon if both use the
+     default PROGENY_QUERY_PORT=9847. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.progenyd</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/sbin/progenyd</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PROGENY_INTERVAL_SEC</key><string>15</string>
+        <key>PROGENY_TOP_N</key><string>20</string>
+        <key>PROGENY_QUERY</key><string>1</string>
+        <key>PROGENY_QUERY_PORT</key><string>9847</string>
+        <!-- Enable OTLP export by uncommenting and setting your own endpoint:
+        <key>PROGENY_OTLP</key><string>1</string>
+        <key>PROGENY_OTLP_ENDPOINT</key><string>http://YOUR-OTLP-ENDPOINT:4318</string>
+        -->
+    </dict>
+
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+
+    <key>ProcessType</key><string>Background</string>
+    <key>LowPriorityIO</key><true/>
+
+    <key>StandardOutPath</key><string>/var/log/progenyd.log</string>
+    <key>StandardErrorPath</key><string>/var/log/progenyd.log</string>
+</dict>
+</plist>

@@ -34,20 +34,34 @@ struct StdoutEmitter: Emitter {
         let totalCPU = procs.reduce(0.0) { $0 + $1.cpuPercent }
         let totalEnergy = procs.reduce(0) { $0 + $1.energyDeltaNJ }
         let orphans = procs.filter(\.orphaned).count
-        let summary: [String: String] = [
-            "ts": ts,
-            "kind": "summary",
-            "procs": String(procs.count),
-            "orphans": String(orphans),
-            "total_cpu_pct": String(format: "%.1f", totalCPU),
-            "total_energy_nj": String(totalEnergy),
-            "host_cpu_user_pct": String(host.cpuUserPct),
-            "host_cpu_sys_pct": String(host.cpuSystemPct),
-            "host_mem_wired_mb": String(host.memWiredBytes / 1_048_576),
-            "host_mem_free_mb": String(host.memFreeBytes / 1_048_576),
-            "host_load1": String(host.load1),
-            "host_thermal": host.thermalState,
-        ]
+        let spotlight = spotlightActivity(procs)
+        var summary: [String: String] = [:]
+        summary["ts"] = ts
+        summary["kind"] = "summary"
+        summary["procs"] = String(procs.count)
+        summary["orphans"] = String(orphans)
+        summary["total_cpu_pct"] = String(format: "%.1f", totalCPU)
+        summary["total_energy_nj"] = String(totalEnergy)
+        summary["host_cpu_user_pct"] = String(host.cpuUserPct)
+        summary["host_cpu_sys_pct"] = String(host.cpuSystemPct)
+        summary["host_mem_wired_mb"] = String(host.memWiredBytes / 1_048_576)
+        summary["host_mem_free_mb"] = String(host.memFreeBytes / 1_048_576)
+        summary["host_load1"] = String(host.load1)
+        summary["host_thermal"] = host.thermalState
+        summary["host_external_power_connected"] = host.externalPowerConnected.map { String($0) } ?? ""
+        summary["host_battery_percent"] = host.batteryPercent.map { String($0) } ?? ""
+        summary["host_battery_power_watts"] = host.batteryPowerWatts.map { String($0) } ?? ""
+        summary["host_fan_rpms"] = host.fanRPMs.map { String($0) }.joined(separator: ",")
+        summary["host_cpu_power_watts"] = host.cpuPowerWatts.map { String($0) } ?? ""
+        summary["host_gpu_power_watts"] = host.gpuPowerWatts.map { String($0) } ?? ""
+        summary["spotlight_active"] = String(spotlight.active)
+        summary["spotlight_process_count"] = String(spotlight.processCount)
+        summary["spotlight_worker_count"] = String(spotlight.workerCount)
+        summary["spotlight_active_worker_count"] = String(spotlight.activeWorkerCount)
+        summary["spotlight_cpu_pct"] = String(spotlight.cpuPercent)
+        summary["spotlight_energy_nj"] = String(spotlight.energyDeltaNJ)
+        summary["spotlight_disk_read"] = String(spotlight.diskReadDelta)
+        summary["spotlight_disk_write"] = String(spotlight.diskWriteDelta)
         printJSON(summary)
 
         // Orphan swarms detected over ALL procs (closes the top-N coverage gap).
@@ -57,6 +71,12 @@ struct StdoutEmitter: Emitter {
                 "count": String(s.count),
                 "total_rss_mb": String(s.totalRssBytes / 1_048_576),
                 "sample_pids": s.samplePids.map(String.init).joined(separator: ","),
+                "sample_start_times": s.sampleStartTimes.map(String.init).joined(separator: ","),
+                "sample_commands": s.sampleCommands.joined(separator: " || "),
+                "original_parent_pids": s.originalParentPids.map(String.init).joined(separator: ","),
+                "original_parent_commands": s.originalParentCommands.joined(separator: " || "),
+                "original_parents_alive": String(s.originalParentsAlive),
+                "example_first_ancestry": s.exampleFirstAncestry,
             ])
         }
 

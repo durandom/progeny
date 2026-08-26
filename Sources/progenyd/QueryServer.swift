@@ -11,6 +11,10 @@ import Foundation
 //   GET /pid/<pid>             one PID's rows across the whole buffer (its trajectory)
 //   GET /comm/<name>           all rows for a command across the buffer (swarm churn!)
 //   GET /window/<minutes>      every process row in the last N minutes
+//   GET /host/latest           host metrics in the newest snapshot
+//   GET /host/window/<minutes> host metrics over the last N minutes
+//   GET /spotlight/latest      Spotlight aggregate in the newest snapshot
+//   GET /spotlight/window/<m>  Spotlight aggregate over the last N minutes
 final class QueryServer: @unchecked Sendable {
     private let ring: RingEmitter
     private let port: UInt16
@@ -89,8 +93,42 @@ final class QueryServer: @unchecked Sendable {
             var out = Data()
             for snap in ring.snapshots() where snap.date >= cutoff { out.append(rows(snap.procs, ts: snap.date)) }
             return out
+        case "host":
+            guard c.count > 1 else { return err("usage: /host/latest or /host/window/<minutes>") }
+            switch c[1] {
+            case "latest":
+                guard let snap = ring.latest() else { return Data() }
+                return hostRow(snap.host, ts: snap.date)
+            case "window":
+                guard c.count > 2, let mins = Double(c[2]) else { return err("usage: /host/window/<minutes>") }
+                let cutoff = Date().addingTimeInterval(-mins * 60)
+                var out = Data()
+                for snap in ring.snapshots() where snap.date >= cutoff {
+                    out.append(hostRow(snap.host, ts: snap.date))
+                }
+                return out
+            default:
+                return err("usage: /host/latest or /host/window/<minutes>")
+            }
+        case "spotlight":
+            guard c.count > 1 else { return err("usage: /spotlight/latest or /spotlight/window/<minutes>") }
+            switch c[1] {
+            case "latest":
+                guard let snap = ring.latest() else { return Data() }
+                return spotlightRow(spotlightActivity(snap.procs), ts: snap.date)
+            case "window":
+                guard c.count > 2, let mins = Double(c[2]) else { return err("usage: /spotlight/window/<minutes>") }
+                let cutoff = Date().addingTimeInterval(-mins * 60)
+                var out = Data()
+                for snap in ring.snapshots() where snap.date >= cutoff {
+                    out.append(spotlightRow(spotlightActivity(snap.procs), ts: snap.date))
+                }
+                return out
+            default:
+                return err("usage: /spotlight/latest or /spotlight/window/<minutes>")
+            }
         default:
-            return Data("{\"routes\":[\"/stats\",\"/latest\",\"/pid/<pid>\",\"/comm/<name>\",\"/window/<minutes>\"]}\n".utf8)
+            return Data("{\"routes\":[\"/stats\",\"/latest\",\"/pid/<pid>\",\"/comm/<name>\",\"/window/<minutes>\",\"/host/latest\",\"/host/window/<minutes>\",\"/spotlight/latest\",\"/spotlight/window/<minutes>\"]}\n".utf8)
         }
     }
 
@@ -111,6 +149,26 @@ final class QueryServer: @unchecked Sendable {
             var body = d; body.removeFirst()   // drop leading '{'
             out.append(Data("{\"ts\":\"\(stamp)\",".utf8)); out.append(body); out.append(0x0A)
         }
+        return out
+    }
+
+    private func hostRow(_ host: HostSample, ts: Date) -> Data {
+        let stamp = ISO8601DateFormatter().string(from: ts)
+        guard let d = try? encoder.encode(host) else { return Data() }
+        var body = d; body.removeFirst()
+        var out = Data("{\"ts\":\"\(stamp)\",".utf8)
+        out.append(body)
+        out.append(0x0A)
+        return out
+    }
+
+    private func spotlightRow(_ spotlight: SpotlightActivity, ts: Date) -> Data {
+        let stamp = ISO8601DateFormatter().string(from: ts)
+        guard let d = try? encoder.encode(spotlight) else { return Data() }
+        var body = d; body.removeFirst()
+        var out = Data("{\"ts\":\"\(stamp)\",".utf8)
+        out.append(body)
+        out.append(0x0A)
         return out
     }
 

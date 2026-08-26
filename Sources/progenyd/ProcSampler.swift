@@ -22,6 +22,17 @@ struct ProcSample: Codable {
     let diskWriteDelta: UInt64
     let startTimeSec: UInt64
 
+    // Birth/first-seen forensics. `ppid` and `ancestry` describe the current
+    // tree; these fields preserve who launched the process when progenyd first
+    // saw this PID/start-time pair, even if it later reparents to launchd.
+    let firstSeenSec: UInt64
+    let firstPpid: Int32
+    let firstAncestry: String
+    let firstParentComm: String?
+    let firstParentPath: String?
+    let firstParentCommand: String?
+    let originalParentAlive: Bool
+
     // Enriched lazily (only for emitted rows) — argv resolution is a per-PID
     // syscall + big buffer, too costly to run for all ~920 procs every tick.
     var path: String?      // full executable path (proc_pidpath)
@@ -104,6 +115,16 @@ final class ProcSampler {
         let wallNS: UInt64
     }
     private var previous: [Int32: Prev] = [:]
+    private struct Birth {
+        let startTimeSec: UInt64
+        let firstSeenSec: UInt64
+        let ppid: Int32
+        let ancestry: String
+        let parentComm: String?
+        let parentPath: String?
+        let parentCommand: String?
+    }
+    private var births: [Int32: Birth] = [:]
 
     // Enumerate all PIDs in a single syscall pass (one sysctl read), then pull
     // bsdinfo (ppid/name) + rusage_v6 (energy/cpu/io) per pid. This is the cheap
@@ -122,6 +143,7 @@ final class ProcSampler {
         for pid in pids where pid > 0 {
             if let info = bsdInfo(pid) { bsd[pid] = info }
         }
+        let nowSec = UInt64(Date().timeIntervalSince1970)
 
         var out: [ProcSample] = []
         out.reserveCapacity(bsd.count)
@@ -149,13 +171,22 @@ final class ProcSampler {
             let dWall = p.map { wallNS &- $0.wallNS } ?? 0
             let dCPU = p.map { cur.cpuTimeNS &- $0.cpuTimeNS } ?? 0
             let cpuPercent = dWall > 0 ? (Double(dCPU) / Double(dWall)) * 100.0 : 0.0
+            let ancestry = ancestry(of: pid, in: bsd)
+            let parentPID = info.pbi_ppid.int32
+            let birth = birthRecord(
+                pid: pid,
+                info: info,
+                ancestry: ancestry,
+                bsd: bsd,
+                nowSec: nowSec
+            )
 
             out.append(ProcSample(
                 pid: pid,
-                ppid: info.pbi_ppid.int32,
+                ppid: parentPID,
                 comm: name(from: info),
-                ancestry: ancestry(of: pid, in: bsd),
-                orphaned: info.pbi_ppid == 1,
+                ancestry: ancestry,
+                orphaned: parentPID == 1,
                 cpuPercent: (cpuPercent * 10).rounded() / 10,
                 rssBytes: ru.ri_phys_footprint,
                 energyDeltaNJ: delta(cur.energyNJ, p?.energyNJ),
@@ -164,7 +195,14 @@ final class ProcSampler {
                 instructionsDelta: delta(cur.instructions, p?.instructions),
                 diskReadDelta: delta(cur.diskRead, p?.diskRead),
                 diskWriteDelta: delta(cur.diskWrite, p?.diskWrite),
-                startTimeSec: info.pbi_start_tvsec
+                startTimeSec: info.pbi_start_tvsec,
+                firstSeenSec: birth.firstSeenSec,
+                firstPpid: birth.ppid,
+                firstAncestry: birth.ancestry,
+                firstParentComm: birth.parentComm,
+                firstParentPath: birth.parentPath,
+                firstParentCommand: birth.parentCommand,
+                originalParentAlive: birth.ppid > 0 && bsd[birth.ppid] != nil
             ))
         }
 
@@ -180,7 +218,35 @@ final class ProcSampler {
         }
 
         previous = nextPrev
+        births = births.filter { pid, birth in
+            bsd[pid]?.pbi_start_tvsec == birth.startTimeSec
+        }
         return out
+    }
+
+    private func birthRecord(
+        pid: Int32,
+        info: proc_bsdinfo,
+        ancestry: String,
+        bsd: [Int32: proc_bsdinfo],
+        nowSec: UInt64
+    ) -> Birth {
+        if let existing = births[pid], existing.startTimeSec == info.pbi_start_tvsec {
+            return existing
+        }
+        let parentPID = info.pbi_ppid.int32
+        let parentInfo = bsd[parentPID]
+        let birth = Birth(
+            startTimeSec: info.pbi_start_tvsec,
+            firstSeenSec: nowSec,
+            ppid: parentPID,
+            ancestry: ancestry,
+            parentComm: parentInfo.map(name(from:)),
+            parentPath: parentPID > 1 ? executablePath(parentPID) : nil,
+            parentCommand: parentPID > 1 ? commandLine(parentPID) : nil
+        )
+        births[pid] = birth
+        return birth
     }
 
     private func delta(_ cur: UInt64, _ prev: UInt64?) -> UInt64 {
@@ -249,7 +315,13 @@ struct OrphanSwarm: Codable {
     let totalRssBytes: UInt64
     let sumEnergyNJ: UInt64
     let samplePids: [Int32]      // a handful, enough to `kill`/inspect
+    let sampleStartTimes: [UInt64]
+    let sampleCommands: [String]
+    let originalParentPids: [Int32]
+    let originalParentCommands: [String]
     let exampleAncestry: String
+    let exampleFirstAncestry: String
+    let originalParentsAlive: Int
 }
 
 // Same-comm ppid==1 clusters of size >= threshold. ppid==1 is the discriminator:
@@ -266,7 +338,13 @@ func detectOrphanSwarms(_ procs: [ProcSample], threshold: Int) -> [OrphanSwarm] 
             totalRssBytes: group.reduce(0) { $0 + $1.rssBytes },
             sumEnergyNJ: group.reduce(0) { $0 + $1.energyDeltaNJ },
             samplePids: group.prefix(8).map(\.pid),
-            exampleAncestry: group.first?.ancestry ?? ""
+            sampleStartTimes: group.prefix(8).map(\.startTimeSec),
+            sampleCommands: group.prefix(8).compactMap(\.command),
+            originalParentPids: Array(Set(group.map(\.firstPpid).filter { $0 > 1 })).sorted().prefix(8).map { $0 },
+            originalParentCommands: Array(Set(group.compactMap(\.firstParentCommand))).sorted().prefix(8).map { $0 },
+            exampleAncestry: group.first?.ancestry ?? "",
+            exampleFirstAncestry: group.first?.firstAncestry ?? "",
+            originalParentsAlive: group.filter(\.originalParentAlive).count
         )
     }.sorted { $0.count > $1.count }
 }
@@ -278,6 +356,73 @@ func maxOrphanCommCount(_ procs: [ProcSample]) -> Int {
     var counts: [String: Int] = [:]
     for p in procs where p.orphaned { counts[p.comm, default: 0] += 1 }
     return counts.values.max() ?? 0
+}
+
+struct SpotlightActivity: Codable {
+    let active: Bool
+    let processCount: Int
+    let workerCount: Int
+    let activeWorkerCount: Int
+    let cpuPercent: Double
+    let energyDeltaNJ: UInt64
+    let diskReadDelta: UInt64
+    let diskWriteDelta: UInt64
+    let mdsCPUPercent: Double
+    let mdsStoresCPUPercent: Double
+    let workerCPUPercent: Double
+    let mdsStoresRSSBytes: UInt64
+    let hotPids: [Int32]
+    let hotCommands: [String]
+}
+
+func spotlightActivity(_ procs: [ProcSample]) -> SpotlightActivity {
+    let spotlight = procs.filter(isSpotlightProcess)
+    let workers = spotlight.filter(isSpotlightWorker)
+    let activeWorkers = workers.filter {
+        $0.cpuPercent >= 0.1 || $0.diskReadDelta > 0 || $0.diskWriteDelta > 0
+    }
+    let hot = spotlight.sorted { lhs, rhs in
+        if lhs.energyDeltaNJ == rhs.energyDeltaNJ { return lhs.cpuPercent > rhs.cpuPercent }
+        return lhs.energyDeltaNJ > rhs.energyDeltaNJ
+    }.prefix(8)
+    let cpuPercent = roundedTenths(spotlight.reduce(0.0) { $0 + $1.cpuPercent })
+    let diskReadDelta = spotlight.reduce(0) { $0 + $1.diskReadDelta }
+    let diskWriteDelta = spotlight.reduce(0) { $0 + $1.diskWriteDelta }
+    return SpotlightActivity(
+        active: !spotlight.isEmpty && (cpuPercent >= 5.0 || diskReadDelta > 0 || diskWriteDelta > 0 || !activeWorkers.isEmpty),
+        processCount: spotlight.count,
+        workerCount: workers.count,
+        activeWorkerCount: activeWorkers.count,
+        cpuPercent: cpuPercent,
+        energyDeltaNJ: spotlight.reduce(0) { $0 + $1.energyDeltaNJ },
+        diskReadDelta: diskReadDelta,
+        diskWriteDelta: diskWriteDelta,
+        mdsCPUPercent: roundedTenths(spotlight.filter { $0.comm == "mds" }.reduce(0.0) { $0 + $1.cpuPercent }),
+        mdsStoresCPUPercent: roundedTenths(spotlight.filter { $0.comm == "mds_stores" }.reduce(0.0) { $0 + $1.cpuPercent }),
+        workerCPUPercent: roundedTenths(workers.reduce(0.0) { $0 + $1.cpuPercent }),
+        mdsStoresRSSBytes: spotlight.filter { $0.comm == "mds_stores" }.reduce(0) { $0 + $1.rssBytes },
+        hotPids: hot.map(\.pid),
+        hotCommands: hot.map { $0.command ?? $0.path ?? $0.comm }
+    )
+}
+
+private func isSpotlightProcess(_ p: ProcSample) -> Bool {
+    switch p.comm {
+    case "mds", "mds_stores", "mdworker", "mdworker_shared", "mdbulkimport", "mdwrite",
+         "corespotlightd", "managedcorespotlightd":
+        return true
+    default:
+        return p.command?.contains("/Metadata.framework/") == true
+            || p.path?.contains("/Metadata.framework/") == true
+    }
+}
+
+private func isSpotlightWorker(_ p: ProcSample) -> Bool {
+    p.comm == "mdworker" || p.comm == "mdworker_shared" || p.comm == "mdbulkimport"
+}
+
+private func roundedTenths(_ value: Double) -> Double {
+    (value * 10).rounded() / 10
 }
 
 // Convert a fixed C char array (imported as a Swift tuple) to a String.
