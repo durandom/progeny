@@ -1,0 +1,52 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # Swift + libproc + IOKit cannot be cross-compiled from Linux. macos-15
+    # is Apple Silicon, which is the only prebuilt orrery consumes.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          arch="$(uname -m)"
+          if [[ "${arch}" != "arm64" ]]; then
+            echo "expected arm64 runner, got ${arch}" >&2
+            exit 1
+          fi
+
+          version="${GITHUB_REF_NAME}"
+          name="progenyd_${version}_darwin_arm64"
+          out="dist/${name}"
+
+          swift --version
+          swift build -c release --product progenyd
+
+          mkdir -p "${out}"
+          install -m 0755 .build/release/progenyd "${out}/progenyd"
+          cp README.md LICENSE "${out}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          rm -rf "${out}"
+
+          (cd dist && shasum -a 256 *.tar.gz > checksums.txt)
+          cat dist/checksums.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt

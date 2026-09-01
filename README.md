@@ -43,6 +43,22 @@ cardinality never becomes a problem (see [docs/DESIGN.md](docs/DESIGN.md)):
 - macOS 14+ (Apple Silicon or Intel)
 - Swift 6.1+ toolchain (Xcode or Command Line Tools — `swift --version`)
 
+## Prebuilt binaries
+
+GitHub Releases ship one Apple Silicon archive:
+
+- `progenyd_<version>_darwin_arm64.tar.gz`
+
+Intel Macs build from source. This repo only publishes the archive;
+install path, checksum pin, and launchd belong to the deploy stack.
+
+Publish a release by pushing a semver tag; see [docs/RELEASING.md](docs/RELEASING.md):
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ## Build & run
 
 ```bash
