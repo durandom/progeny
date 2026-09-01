@@ -12,7 +12,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The `release` workflow runs on `macos-15` (Apple Silicon) and publishes:
+The `release` workflow runs on `macos-26` (Apple Silicon, Swift 6.3) and publishes:
 
 - `progenyd_<version>_darwin_arm64.tar.gz`
 - `checksums.txt`

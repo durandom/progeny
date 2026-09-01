@@ -7,7 +7,7 @@ on:
 
 jobs:
   swift-build:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - run: swift build -c release --product progenyd
