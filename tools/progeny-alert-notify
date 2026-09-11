@@ -1,0 +1,243 @@
+#!/usr/bin/python3
+"""Deliver progenyd alert firings to the logged-in user.
+
+progenyd runs as a root LaunchDaemon and has no GUI session: it cannot post a
+notification, cannot `open` a file, and must not run a 30-second LLM call inside
+its sampling loop. So it does none of that. It appends one JSON line per firing
+to a world-readable handover file, and this script -- a plain LaunchAgent
+running as you -- turns that line into something you will actually see.
+
+    progeny-alert-notify            # process new firings, then exit
+    progeny-alert-notify --last     # re-deliver the most recent firing (testing)
+    progeny-alert-notify --dry-run  # print what would happen, deliver nothing
+
+Driven by WatchPaths in deploy/local.progeny-alert.plist, so it runs only when
+the file actually changes and costs nothing in between.
+
+Environment:
+    PROGENY_ALERT_LOG     handover file (default /usr/local/var/progeny/alerts.ndjson)
+    PROGENY_REPORT_DIR    where reports land (default ~/.local/state/progeny/reports)
+    PROGENY_REPO          repo whose skills `claude -p` may use, and its cwd
+    PROGENY_ALERT_CLAUDE  1 (default) to write an LLM report, 0 for facts only
+    PROGENY_ALERT_OPEN    1 (default) to open the report, 0 to only notify
+    PROGENY_ALERT_TIMEOUT seconds to allow `claude -p` (default 180)
+"""
+
+import json
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+import time
+
+HOME = pathlib.Path.home()
+ALERT_LOG = pathlib.Path(os.environ.get(
+    "PROGENY_ALERT_LOG", "/usr/local/var/progeny/alerts.ndjson"))
+REPORT_DIR = pathlib.Path(os.environ.get(
+    "PROGENY_REPORT_DIR", HOME / ".local/state/progeny/reports"))
+CURSOR = pathlib.Path(os.environ.get(
+    "PROGENY_ALERT_CURSOR", HOME / ".local/state/progeny/alert-cursor.json"))
+REPO = pathlib.Path(os.environ.get("PROGENY_REPO", HOME / "src/durandom/progeny"))
+USE_CLAUDE = os.environ.get("PROGENY_ALERT_CLAUDE", "1") == "1"
+DO_OPEN = os.environ.get("PROGENY_ALERT_OPEN", "1") == "1"
+TIMEOUT = int(os.environ.get("PROGENY_ALERT_TIMEOUT", "180"))
+
+
+def log(msg):
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+# ---------------------------------------------------------------- cursor
+# The handover file only grows, so a byte offset is enough -- but it is
+# truncated whenever the daemon restarts onto a fresh file, and an offset past
+# the end would then skip every new firing in silence. Pin it to the inode and
+# reset when either the identity or the length says this is not the same file.
+
+def read_cursor():
+    try:
+        c = json.loads(CURSOR.read_text())
+        st = ALERT_LOG.stat()
+        if c.get("inode") != st.st_ino or c.get("offset", 0) > st.st_size:
+            return 0
+        return c.get("offset", 0)
+    except Exception:
+        return 0
+
+
+def write_cursor(offset):
+    try:
+        CURSOR.parent.mkdir(parents=True, exist_ok=True)
+        CURSOR.write_text(json.dumps(
+            {"inode": ALERT_LOG.stat().st_ino, "offset": offset}))
+    except Exception as e:
+        log(f"cursor not saved ({e}) -- the next run may re-deliver")
+
+
+def new_firings(from_start=False):
+    if not ALERT_LOG.exists():
+        return [], 0
+    offset = 0 if from_start else read_cursor()
+    with ALERT_LOG.open("r") as fh:
+        fh.seek(offset)
+        text = fh.read()
+        end = fh.tell()
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            log("skipping a malformed line in the handover file")
+    return out, end
+
+
+# ---------------------------------------------------------------- report
+
+def facts_report(firing):
+    """The report we can always produce, with no LLM and no network."""
+    rule = firing.get("rule", "?")
+    lines = [
+        f"# progeny — {rule}",
+        "",
+        f"**Host:** {firing.get('host','?')} · **Fired:** {firing.get('ts','?')} · "
+        f"**Matches:** {firing.get('matches','?')}",
+        "",
+    ]
+    if firing.get("description"):
+        lines += [f"> {firing['description']}", ""]
+    rows = firing.get("rows") or []
+    if rows:
+        cols = list(rows[0].keys())
+        lines += [
+            "| " + " | ".join(cols) + " |",
+            "|" + "|".join("---" for _ in cols) + "|",
+        ]
+        for r in rows:
+            lines.append("| " + " | ".join(str(r.get(c, "")) for c in cols) + " |")
+        lines.append("")
+    return "\n".join(lines)
+
+
+CLAUDE_PROMPT = """\
+progenyd fired the alert rule `{rule}` on host `{host}` at {ts}.
+
+This is the rule's own SQL result, verbatim:
+
+```json
+{rows}
+```
+
+Write a short markdown incident report for the machine's owner. Use the
+`progeny-analyze` skill to query progeny's telemetry for whatever the rule rows
+do not already say -- in particular: how long this has been going on, whether
+the process is still alive, who spawned it (ancestry and first parent), and
+whether it is one process leaking or a swarm respawning.
+
+Structure it as: what is burning, since when, who started it, and what the owner
+should do about it. Name the exact command to stop it if stopping is the right
+call -- and say plainly if it is legitimate work that should be left alone. Be
+concrete and brief; the reader wants a decision, not a tutorial. Do not invent
+numbers: everything you state must come from a query you ran or from the rows
+above.
+"""
+
+
+def claude_report(firing):
+    claude = shutil.which("claude") or str(HOME / ".local/bin/claude")
+    if not os.path.exists(claude):
+        log("claude not found -- falling back to the facts-only report")
+        return None
+    prompt = CLAUDE_PROMPT.format(
+        rule=firing.get("rule", "?"),
+        host=firing.get("host", "?"),
+        ts=firing.get("ts", "?"),
+        rows=json.dumps(firing.get("rows", []), indent=2)[:8000],
+    )
+    try:
+        p = subprocess.run(
+            [claude, "-p", prompt],
+            cwd=str(REPO) if REPO.is_dir() else None,
+            capture_output=True, text=True, timeout=TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        log(f"claude -p exceeded {TIMEOUT}s -- falling back to the facts-only report")
+        return None
+    except Exception as e:
+        log(f"claude -p failed ({e}) -- falling back to the facts-only report")
+        return None
+    if p.returncode != 0 or not p.stdout.strip():
+        log(f"claude -p returned {p.returncode} with no usable output -- falling back")
+        return None
+    return p.stdout.strip()
+
+
+# ---------------------------------------------------------------- deliver
+
+def notify(title, message, report_path):
+    tn = shutil.which("terminal-notifier") or "/opt/homebrew/bin/terminal-notifier"
+    if os.path.exists(tn):
+        subprocess.run([
+            tn, "-title", title, "-subtitle", "progeny", "-message", message,
+            "-execute", f"/usr/bin/open -a MarkEdit {report_path}",
+            "-group", "progeny-alert",
+        ], capture_output=True)
+        return
+    # osascript always exists; it just cannot carry a click action.
+    subprocess.run([
+        "/usr/bin/osascript", "-e",
+        f'display notification {json.dumps(message)} with title {json.dumps(title)}',
+    ], capture_output=True)
+
+
+def deliver(firing, dry_run=False):
+    rule = firing.get("rule", "alert")
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    path = REPORT_DIR / f"{stamp}-{rule}.md"
+
+    rows = firing.get("rows") or []
+    first = rows[0] if rows else {}
+    headline = first.get("comm") or first.get("pid") or f"{firing.get('matches','?')} matches"
+    message = f"{headline} — {rule}"
+
+    if dry_run:
+        log(f"would write {path}")
+        log(f"would notify: {message}")
+        log(f"would open: {DO_OPEN}")
+        return
+
+    body = (claude_report(firing) if USE_CLAUDE else None) or facts_report(firing)
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    path.write_text(body + "\n")
+    log(f"report written: {path}")
+
+    notify("progeny: runaway detected", message, path)
+    if DO_OPEN:
+        subprocess.run(["/usr/bin/open", "-a", "MarkEdit", str(path)], capture_output=True)
+
+
+def main():
+    args = sys.argv[1:]
+    dry = "--dry-run" in args
+    last = "--last" in args
+
+    firings, end = new_firings(from_start=last)
+    if last:
+        firings = firings[-1:]
+    if not firings:
+        log("no new firings")
+        return 0
+
+    log(f"{len(firings)} firing(s) to deliver")
+    for f in firings:
+        deliver(f, dry_run=dry)
+    # Advance only after delivery, so a crash re-delivers rather than losing one.
+    if not dry and not last:
+        write_cursor(end)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

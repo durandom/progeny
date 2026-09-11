@@ -233,8 +233,18 @@ struct AlertLogSink: AlertSink {
         if let d = firing.rule.description { record["description"] = d }
         guard let data = try? JSONSerialization.data(withJSONObject: record, options: [.withoutEscapingSlashes]) else { return }
 
-        try? FileManager.default.createDirectory(at: path.deletingLastPathComponent(),
-                                                 withIntermediateDirectories: true)
+        // World-readable on purpose: written by the root daemon, read by the
+        // unprivileged delivery agent. Set explicitly rather than inheriting
+        // root's umask, which on a hardened box can be 027 and would make the
+        // handover silently unreadable.
+        let fm = FileManager.default
+        try? fm.createDirectory(at: path.deletingLastPathComponent(),
+                                withIntermediateDirectories: true,
+                                attributes: [.posixPermissions: 0o755])
+        if !fm.fileExists(atPath: path.path) {
+            fm.createFile(atPath: path.path, contents: nil,
+                          attributes: [.posixPermissions: 0o644])
+        }
         if let fh = try? FileHandle(forWritingTo: path) {
             defer { try? fh.close() }
             _ = try? fh.seekToEnd()

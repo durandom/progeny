@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Delivery half of progeny alerting. progenyd itself runs as a root
+  LaunchDaemon with no GUI session, so it only appends firings to
+  /usr/local/var/progeny/alerts.ndjson. This agent runs as you, in your
+  session, and is what actually reaches you.
+
+  WatchPaths, not a timer: launchd starts this only when the handover file
+  changes, so an idle machine pays nothing. RunAtLoad is deliberately absent —
+  loading the agent should not replay a firing from before you logged in.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>local.progeny-alert</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.local/bin/progeny-alert-notify</string>
+  </array>
+
+  <key>WatchPaths</key>
+  <array>
+    <string>/usr/local/var/progeny/alerts.ndjson</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PROGENY_ALERT_LOG</key>
+    <string>/usr/local/var/progeny/alerts.ndjson</string>
+    <key>PROGENY_REPO</key>
+    <string>__HOME__/src/durandom/progeny</string>
+    <!-- 0 turns off the generated report and falls back to the rule's own rows. -->
+    <key>PROGENY_ALERT_CLAUDE</key>
+    <string>1</string>
+    <!-- 0 notifies without stealing focus; the notification still opens on click. -->
+    <key>PROGENY_ALERT_OPEN</key>
+    <string>1</string>
+    <key>PATH</key>
+    <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <!-- Report generation is a network round-trip, not a hot loop. -->
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>Nice</key>
+  <integer>5</integer>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/progeny-alert.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/progeny-alert.log</string>
+</dict>
+</plist>

@@ -32,6 +32,14 @@ struct Config {
         let defaultWAL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/state/progeny")
         let defaultAlertDir = URL(fileURLWithPath: "/usr/local/share/progeny/alerts")
+        // Delivery is a separate, unprivileged LaunchAgent (progenyd itself has
+        // no GUI session), so the firing log is a handover point between two
+        // different users. Under the root LaunchDaemon
+        // `homeDirectoryForCurrentUser` is `/var/root`, which is 0750 — the
+        // agent could not read a single line. Hand over somewhere both can reach.
+        let defaultAlertLog = geteuid() == 0
+            ? URL(fileURLWithPath: "/usr/local/var/progeny/alerts.ndjson")
+            : defaultWAL.appendingPathComponent("alerts.ndjson")
         return Config(
             intervalSec: e["PROGENY_INTERVAL_SEC"].flatMap(Double.init) ?? 15,
             topN: e["PROGENY_TOP_N"].flatMap(Int.init) ?? 20,
@@ -48,8 +56,7 @@ struct Config {
             hostName: e["PROGENY_HOST_NAME"] ?? Config.defaultHostName(),
             alertEnabled: (e["PROGENY_ALERT"] ?? "0") == "1",
             alertRuleDir: e["PROGENY_ALERT_DIR"].map { URL(fileURLWithPath: $0) } ?? defaultAlertDir,
-            alertLogPath: e["PROGENY_ALERT_LOG"].map { URL(fileURLWithPath: $0) }
-                ?? defaultWAL.appendingPathComponent("alerts.ndjson"),
+            alertLogPath: e["PROGENY_ALERT_LOG"].map { URL(fileURLWithPath: $0) } ?? defaultAlertLog,
             alertRetainMin: e["PROGENY_ALERT_RETAIN_MIN"].flatMap(Int.init) ?? 60
         )
     }

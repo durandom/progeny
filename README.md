@@ -133,6 +133,73 @@ sampling later.
 | `PROGENY_WAL` | `0` | also write a flat-NDJSON write-ahead log to disk (off by default) |
 | `PROGENY_WAL_DIR` | `~/.local/state/progeny` | WAL directory |
 | `PROGENY_STDOUT` | `0` | also print NDJSON to stdout (dev) |
+| `PROGENY_ALERT` | `0` | evaluate alert rules locally |
+| `PROGENY_ALERT_DIR` | `/usr/local/share/progeny/alerts` | directory of `*.alert.json` rules |
+| `PROGENY_ALERT_LOG` | `/usr/local/var/progeny/alerts.ndjson` as root, else `~/.local/state/progeny/alerts.ndjson` | where firings are appended |
+| `PROGENY_ALERT_RETAIN_MIN` | `60` | evaluator window depth (raised automatically to the longest rule period) |
+
+## Alerting
+
+Telemetry you never look at is not much better than no telemetry. progenyd can
+evaluate alert rules itself, every tick, against the data it just collected.
+
+**Rules are written in OpenObserve's own alert shape, not a shape of our own**,
+so one file is both installed server-side and evaluated locally. See
+`deploy/alerts/runaway-sustained.alert.json`. What makes that work is narrow and
+was measured rather than assumed: OpenObserve runs Apache DataFusion, and a
+plain aggregate query — `COUNT`/`SUM`/`AVG` with `WHERE`, `GROUP BY`, `HAVING`
+and `CAST` — evaluates identically in SQLite. `AlertRule.validate()` enforces
+that subset, so a rule that would fire on only one engine fails at startup
+instead of silently half-working.
+
+Two traps it enforces, both found the hard way:
+
+- ⚠️ `CAST(x AS INTEGER)` returns **zero rows** in DataFusion, with no error.
+  Use `BIGINT`.
+- ⚠️ `SELECT *` is rejected by OpenObserve alerts.
+
+Locally the evaluator mirrors each tick into an in-memory SQLite table whose
+column names and types match the `progeny_process_raw` stream exactly, then runs
+the rule's SQL verbatim. It feeds on the same top-N-by-energy selection that
+OTLP ships, so the identical rule means the identical thing in both places.
+
+### Delivery is a separate, unprivileged agent
+
+progenyd has no GUI session — as a root LaunchDaemon it cannot post a
+notification, cannot `open` a file, and must not run a multi-second LLM call
+inside its sampling loop. So it does none of that: it appends one JSON line per
+firing to `PROGENY_ALERT_LOG` and stops there.
+
+`tools/progeny-alert-notify` is the other half. It runs as **you**, driven by
+`WatchPaths` in `deploy/local.progeny-alert.plist`, so it wakes only when a
+firing lands. It generates a report with `claude -p` (using the
+`progeny-analyze` skill to fill in what the rule rows do not say — ancestry,
+duration, leak vs respawn swarm), writes it to
+`~/.local/state/progeny/reports/`, posts a notification and opens it. If
+`claude` is missing, fails or exceeds `PROGENY_ALERT_TIMEOUT`, it falls back to
+a facts-only report built from the rule's own rows — **an alert is never lost to
+its report generator.**
+
+```bash
+# rules the daemon reads
+sudo install -d -m 0755 /usr/local/share/progeny/alerts
+sudo install -m 0644 deploy/alerts/*.alert.json /usr/local/share/progeny/alerts/
+
+# the delivery agent, as you
+install -m 0755 tools/progeny-alert-notify ~/.local/bin/progeny-alert-notify
+sed "s|__HOME__|$HOME|g" deploy/local.progeny-alert.plist \
+  > ~/Library/LaunchAgents/local.progeny-alert.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.progeny-alert.plist
+
+# then turn alerting on in the daemon's plist: PROGENY_ALERT=1, and reload it
+```
+
+Test the delivery path without waiting for a real runaway:
+
+```bash
+progeny-alert-notify --dry-run   # show what would happen
+progeny-alert-notify --last      # re-deliver the most recent firing
+```
 
 ## The in-RAM query server
 
