@@ -22,11 +22,16 @@ struct Config {
     var queryPort: UInt16
     var otlpDiagLevel: String       // swift-otel's own verbosity; see otelLogLevel
     var hostName: String            // resource attribute: which machine these series came from
+    var alertEnabled: Bool
+    var alertRuleDir: URL           // *.alert.json, the same files installed into OpenObserve
+    var alertLogPath: URL
+    var alertRetainMin: Int         // window table depth; bounds the evaluator's memory
 
     static func fromEnv() -> Config {
         let e = ProcessInfo.processInfo.environment
         let defaultWAL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/state/progeny")
+        let defaultAlertDir = URL(fileURLWithPath: "/usr/local/share/progeny/alerts")
         return Config(
             intervalSec: e["PROGENY_INTERVAL_SEC"].flatMap(Double.init) ?? 15,
             topN: e["PROGENY_TOP_N"].flatMap(Int.init) ?? 20,
@@ -40,7 +45,12 @@ struct Config {
             queryEnabled: (e["PROGENY_QUERY"] ?? "1") == "1",
             queryPort: e["PROGENY_QUERY_PORT"].flatMap { UInt16($0) } ?? 9847,
             otlpDiagLevel: e["PROGENY_OTLP_DIAG_LEVEL"] ?? "warning",
-            hostName: e["PROGENY_HOST_NAME"] ?? Config.defaultHostName()
+            hostName: e["PROGENY_HOST_NAME"] ?? Config.defaultHostName(),
+            alertEnabled: (e["PROGENY_ALERT"] ?? "0") == "1",
+            alertRuleDir: e["PROGENY_ALERT_DIR"].map { URL(fileURLWithPath: $0) } ?? defaultAlertDir,
+            alertLogPath: e["PROGENY_ALERT_LOG"].map { URL(fileURLWithPath: $0) }
+                ?? defaultWAL.appendingPathComponent("alerts.ndjson"),
+            alertRetainMin: e["PROGENY_ALERT_RETAIN_MIN"].flatMap(Int.init) ?? 60
         )
     }
 
@@ -77,14 +87,38 @@ nonisolated(unsafe) let config = Config.fromEnv()
 nonisolated(unsafe) let sampler = ProcSampler()
 nonisolated(unsafe) let hostSampler = HostSampler()
 nonisolated(unsafe) let ring = RingEmitter(capacity: config.ringCapacity)
+nonisolated(unsafe) let alertEmitter: AlertEmitter? = buildAlertEmitter()
 nonisolated(unsafe) var emitter: any Emitter = StdoutEmitter(topN: config.topN)
 nonisolated(unsafe) var samplerTimer: (any DispatchSourceTimer)?
 nonisolated(unsafe) var queryServer: QueryServer?
+
+// Built once, outside buildEmitters, so the rule-loading problems can be logged
+// at startup rather than swallowed inside the emitter fan-out.
+func buildAlertEmitter() -> AlertEmitter? {
+    guard config.alertEnabled else { return nil }
+    let (rules, problems) = AlertRuleLoader.load(from: config.alertRuleDir)
+    for p in problems {
+        FileHandle.standardError.write(Data("progenyd: alert rule rejected — \(p)\n".utf8))
+    }
+    let skipped = rules.filter { !$0.isLocallyEvaluable }.map(\.name)
+    if !skipped.isEmpty {
+        // PromQL and real-time rules are valid in OpenObserve; they simply have
+        // no local engine. Say so, or their silence here looks like a bug.
+        FileHandle.standardError.write(Data(
+            "progenyd: alert rules not evaluated locally (not sql): \(skipped.joined(separator: ", "))\n".utf8))
+    }
+    return AlertEmitter(rules: rules,
+                        sink: AlertLogSink(path: config.alertLogPath),
+                        hostName: config.hostName,
+                        retainMinutes: config.alertRetainMin,
+                        topN: config.topN)
+}
 
 func buildEmitters(includingOTel otel: Bool) -> any Emitter {
     var list: [any Emitter] = []
     if config.queryEnabled { list.append(ring) }   // in-RAM deep-forensic buffer (no SSD)
     if config.walEnabled { list.append(WALEmitter(dir: config.walDir)) }
+    if let alerts = alertEmitter { list.append(alerts) }
     if otel { list.append(OTelEmitter(topN: config.topN, swarmThreshold: config.swarmThreshold)) }
     if config.stdoutEnabled || list.isEmpty {
         list.append(StdoutEmitter(topN: config.topN, swarmThreshold: config.swarmThreshold))
@@ -97,6 +131,7 @@ func sinkLabel(otel: Bool) -> String {
     var s: [String] = []
     if config.queryEnabled { s.append("RAM(\(Int(config.memWindowMin))m@:\(config.queryPort))") }
     if config.walEnabled { s.append("WAL(\(config.walDir.path))") }
+    if alertEmitter != nil { s.append("alerts(\(config.alertRuleDir.path))") }
     if otel { s.append("OTLP→\(config.otlpEndpoint ?? "default")") }
     if config.stdoutEnabled || s.isEmpty { s.append("stdout") }
     return s.joined(separator: " + ")

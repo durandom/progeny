@@ -1,0 +1,21 @@
+{
+  "name": "progeny_runaway_sustained",
+  "stream_type": "logs",
+  "stream_name": "progeny_process_raw",
+  "is_real_time": false,
+  "enabled": true,
+  "description": "A non-Apple process older than 24h has averaged >= 25% CPU for three hours. Catches the forgotten long-runner, which is the failure mode that actually costs days: on 2026-09-10 a spinning Python (99% CPU, 54h, 819 kJ) and a tsx watcher (31% CPU, 94h, 315 kJ) were both found by hand only after the Mac felt slow. Neither an energy-per-hour nor a CPU-percent threshold catches both -- the tsx watcher peaked at 5.3 kJ/h, below legitimate build spikes of 40-50 kJ/h. Age plus sustained CPU is what separates them. Calibrated against 7 days on ganymede+proteus: 15 distinct processes over the week, the top five all genuine leaks; Apple's own daemons (mds, fseventsd, WindowServer, syspolicyd) are excluded by path because they are doing their job, not leaking.",
+  "destinations": [],
+  "query_condition": {
+    "type": "sql",
+    "sql": "SELECT host_name, comm, pid, ppid, count(*) AS ticks, avg(CAST(cpu_percent AS DOUBLE)) AS avg_cpu, sum(CAST(energy_nj AS DOUBLE)) / 1000000000000.0 AS kj, (max(_timestamp) / 1000000 - max(CAST(start_time_sec AS BIGINT))) / 3600 AS age_hours, max(command) AS command FROM \"progeny_process_raw\" WHERE path NOT LIKE '/System/%' AND path NOT LIKE '/usr/libexec/%' AND path NOT LIKE '/usr/sbin/%' AND path NOT LIKE '/Library/Apple/%' GROUP BY host_name, comm, pid, ppid HAVING avg(CAST(cpu_percent AS DOUBLE)) >= 25 AND (max(_timestamp) / 1000000 - max(CAST(start_time_sec AS BIGINT))) >= 86400 ORDER BY kj DESC"
+  },
+  "trigger_condition": {
+    "period": 180,
+    "operator": ">=",
+    "threshold": 1,
+    "frequency": 30,
+    "frequency_type": "minutes",
+    "silence": 180
+  }
+}

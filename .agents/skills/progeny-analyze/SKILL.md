@@ -45,21 +45,26 @@ daemon isn't running, there's no fresh data — say so.
 | Question type | Surface | How |
 |---|---|---|
 | Trends / pressure / long-term / cross-machine | **metrics** (`progeny_system_*`, `progeny_host_*`) in OpenObserve — complete aggregates | `progeny-oo metrics …` |
-| "Which process / who spawned it / what command", swarms | **logs** — per-PID top-N + swarm records. ⚠️ **Not available today**, see below | `progeny-oo logs …` |
+| "Which process / who spawned it / what command", swarms | **logs** — per-PID top-N + swarm records, stream `progeny_process_raw` | `progeny-oo logs …` |
 | **Deep forensics NOW** — full per-PID history, every process, **churn/trajectory** | **in-RAM ring** (localhost, ~4h, no SSD) | `progeny-local …` |
 
-⚠️ **The OTLP logs surface has never worked.** As of 2026-08-26 OpenObserve holds
-only three logs streams — `host_auth_raw`, `host_fault_raw`, `host_kernel_raw` —
-all from Linux hosts. There has never been a progenyd logs stream, not even
-during 2026-08-20..24 when progeny *metrics* were landing normally. progenyd is
-not at fault: pointed at a local OTLP catcher it posts `/v1/logs` (161 KB per
-24 s) alongside `/v1/metrics` (12 KB), so the emitter, protocol and batching are
-correct. The collector accepts the logs signal and does not route it into
-OpenObserve. Tracked as orrery bead `orr-xmb`.
+✅ **The OTLP logs surface works.** Verified 2026-09-10: OpenObserve holds
+`progeny_process_raw` with ~302,000 rows per 24 h from two hosts (`ganymede`,
+`proteus`) and history going back at least two weeks. A full runaway
+post-mortem — 54 h of a spinning process at 99.4 % CPU, with ancestry and argv —
+was answered entirely from this stream. Whatever broke the collector routing in
+August (orrery bead `orr-xmb`) has since been fixed; the ⚠️ warning that used to
+stand here said the surface had "never worked" and was wrong by the time anyone
+read it.
 
-Until that is fixed, **every per-PID question must be answered from `progeny-local`**
-(the in-RAM ring), not from `progeny-oo logs`. The `queries/*.sql` files that
-select from a logs stream are unexercised against the real sink.
+Two things about this stream that do bite:
+
+- **Numeric fields are strings.** Always `CAST(x AS DOUBLE)`. The exception is
+  `_timestamp`, which really is a number — do not cast it.
+- ⚠️ **`CAST(x AS INTEGER)` silently returns zero rows** in DataFusion, with no
+  error. Use `BIGINT`. Same trap with `orphaned`/`original_parent_alive`: they
+  are the strings `'true'`/`'false'`, and casting them to a number yields an
+  empty result that looks exactly like "nothing wrong found".
 
 Rule of thumb: **`progeny-oo` for "over days / is it normal", `progeny-local` for "what exactly
 is happening in the last hours, every PID, changing how"**. `progeny-local` has no top-N

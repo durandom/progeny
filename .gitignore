@@ -3,3 +3,6 @@
 reference/
 *.xcodeproj
 DerivedData/
+
+# pi agent session state — tool scratch, not part of the daemon
+.pi-glla/
